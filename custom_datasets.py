@@ -71,18 +71,12 @@ class CustomDataset(torch.utils.data.Dataset):
         if train:
             self.x_data_path = path + '/train/x_data'
             self.y_data_path = path + '/train/y_data'
-            # self.y_data_time_path = path + '/train/time_mask'
-            self.y_data_freq_path = path + '/train/frequency_mask'
         else:
             self.x_data_path = path + '/test/x_data'
             self.y_data_path = path + '/test/y_data'
-            # self.y_data_time_path = path + '/test/time_mask'
-            self.y_data_freq_path = path + '/test/frequency_mask'
 
         self.x_data_list = sorted(glob(self.x_data_path + '/*.wav'))
         self.y_data_list = sorted(glob(self.y_data_path + '/*.wav'))
-        # self.y_data_time_list = sorted(glob(self.y_data_path + '/*.npy'))
-        self.y_data_freq_list = sorted(glob(self.y_data_freq_path + '/*.npy'))
 
     def __len__(self):
         return len(self.x_data_list)
@@ -93,6 +87,4 @@ class CustomDataset(torch.utils.data.Dataset):
         y_data, _ = librosa.load(self.y_data_list[idx], sr=self.sr)
         y_data /= np.max(np.abs(y_data))
 
-        y_data_freq = np.load(self.y_data_freq_list[idx]) - 0.5
-
-        return x_data, y_data, y_data_freq
+        return x_data, y_data

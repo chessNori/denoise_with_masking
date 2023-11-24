@@ -8,12 +8,13 @@ import librosa
 import numpy as np
 
 data_load = False
-train_mask = False
-train_ae = False
+train_u_bool = False
 evaluate = True
 
 n_fft = 512
-EPOCHS = 50
+EPOCHS = 10
+batch_size = 8
+speech_threshold = 0.00001
 
 if data_load:
     load_path = '../datasets/libriSpeech/train-clean-100'
@@ -24,16 +25,16 @@ if data_load:
     noise2, __sr__ = librosa.load('../datasets/demand/NRIVER/ch01.wav', sr=16000)
     noise3, __sr__ = librosa.load('../datasets/demand/NFIELD/ch01.wav', sr=16000)
     noise4, __sr__ = librosa.load('../datasets/demand/OOFFICE/ch01.wav', sr=16000)
-    noise1 = np.expand_dims(noise1[2500:2500 + 512 * 100], 0)
-    noise2 = np.expand_dims(noise2[2500:2500 + 512 * 100], 0)
-    noise3 = np.expand_dims(noise3[:512 * 100], 0)
-    noise4 = np.expand_dims(noise4[2820:2820 + 512 * 100], 0)
+    noise1 = np.expand_dims(noise1[2500:2500 + 512 * 300], 0)
+    noise2 = np.expand_dims(noise2[2500:2500 + 512 * 300], 0)
+    noise3 = np.expand_dims(noise3[:512 * 300], 0)
+    noise4 = np.expand_dims(noise4[2820:2820 + 512 * 300], 0)
     noise_pack = np.concatenate((noise1, noise2, noise3, noise4), axis=0)
     # noise_pack = np.concatenate((noise_pack, np.zeros((4, 256))), axis=1)
 
     for i in range(5500):
         wave, __sr__ = librosa.load(file_name[i], sr=16000)
-        wave = wave[:512 * 100]  # y_data
+        wave = wave[:512 * 300]  # y_data
 
         wave_temp = np.copy(wave)
         wave_temp = np.concatenate((wave_temp, np.zeros(256)), axis=0)
@@ -84,107 +85,62 @@ device = (
 print(f"Using {device} device")
 
 dataset = custom_datasets.CustomDataset(train=True)
-dataloader = torch.utils.data.DataLoader(dataset=dataset, batch_size=32, shuffle=True, drop_last=False)
+dataloader = torch.utils.data.DataLoader(dataset=dataset, batch_size=batch_size, shuffle=True, drop_last=False)
 dataset_test = custom_datasets.CustomDataset(train=False)
-dataloader_test = torch.utils.data.DataLoader(dataset=dataset_test, batch_size=32, shuffle=False, drop_last=False)
+dataloader_test = torch.utils.data.DataLoader(dataset=dataset_test, batch_size=batch_size, shuffle=False, drop_last=False)
 
-for x, y, y_f in dataloader:
-    print(x.shape, y.shape, y_f.shape)
+for x, y in dataloader:
+    print(x.shape, y.shape)
     break
 
-mask_model = models.Masking(n_fft=n_fft).to(device)
+_model = models.UNET(n_fft=n_fft).to(device)
 
-_optimizer_mask = torch.optim.Adam(mask_model.parameters(), lr=1e-4)
-_loss_fn_mask = torch.nn.MSELoss()
+_optimizer = torch.optim.Adam(_model.parameters(), lr=1e-4)
+_loss_fn = torch.nn.MSELoss()
 
 
-def train_step(data_loader, model, loss_fn, optimizer):  # mask
+def train_u(data_loader, model,loss_fn, optimizer):
     model.train()
     train_loss = 0.
-    for batch_idx, (x_data, y_data, y_data_freq) in enumerate(data_loader):
-        x_data, y_data_freq = x_data.to(device), y_data_freq.to(device)
-        freq_mask = model(x_data)
-        cost = loss_fn(freq_mask, y_data_freq)
+    for batch_idx, (x_data, y_data) in enumerate(data_loader):
+        x_data, y_data = x_data.to(device), y_data.to(device)
+        pred = model(x_data)
+        cost = loss_fn(pred, y_data)
 
         optimizer.zero_grad()
         cost.backward()
         optimizer.step()
         train_loss += cost.item()
-    train_loss /= len(data_loader)
 
+    train_loss /= len(data_loader) * batch_size
     print('Train Error: {:.6f}'.format(train_loss), end='')
 
 
-def test_step(data_loader, model, loss_fn):  # mask
+def test_u(data_loader, model, loss_fn):
     test_loss = 0.
     with torch.no_grad():
-        for x_data, y_data, y_data_freq in data_loader:
-            x_data, y_data_freq = x_data.to(device), y_data_freq.to(device)
-            freq_mask = model(x_data)
-            cost = loss_fn(freq_mask, y_data_freq)
+        for x_data, y_data in data_loader:
+            x_data, y_data = x_data.to(device), y_data.to(device)
+            pred = model(x_data)
+            cost = loss_fn(pred, y_data)
             test_loss += cost.item()
-    test_loss /= len(data_loader)
+
+    test_loss /= len(data_loader) * batch_size
     print(f" // Test Error: {test_loss:>5f}\n")
 
 
-denoise_model = models.Autoencoder().to(device)
-
-_optimizer_denoise = torch.optim.Adam(denoise_model.parameters(), lr=1e-4)
-_loss_fn_denoise = torch.nn.MSELoss()
-
-
-def train_s(data_loader, model, loss_fn, optimizer, mask_func):  # denoise
-    model.train()
-    train_loss = 0.
-    for batch_idx, (x_data, y_data, y_data_freq) in enumerate(data_loader):
-        x_data, y_data, y_data_freq = x_data.to(device), y_data.to(device), y_data_freq.to(device)
-        with torch.no_grad():
-            freq_mask = mask_func(x_data)  # generate mask
-            xx_data = models.masking(x_data, freq_mask)  # masking x_data
-            yy_data = models.masking(y_data, y_data_freq)  # masking y_data
-        pred = model(xx_data)
-        cost = loss_fn(pred, yy_data)
-
-        optimizer.zero_grad()
-        cost.backward()
-        optimizer.step()
-        train_loss += cost.item()
-    train_loss /= len(data_loader)
-
-    print('Train Error: {:.6f}'.format(train_loss), end='')
-
-
-def test_s(data_loader, model, loss_fn, mask_func):  # denoise
-    test_loss = 0.
-    with torch.no_grad():
-        for x_data, y_data, y_data_freq in data_loader:
-            x_data, y_data, y_data_freq = x_data.to(device), y_data.to(device), y_data_freq.to(device)
-            freq_mask = mask_func(x_data)  # generate mask
-            xx_data = models.masking(x_data, freq_mask)  # masking x_data
-            yy_data = models.masking(y_data, y_data_freq)  # masking y_data
-            pred = model(xx_data)
-            cost = loss_fn(pred, yy_data)
-            test_loss += cost.item()
-
-    test_loss /= len(data_loader)
-    print(f" // Test Error: {test_loss:>5f}\n")
-
-
-def evaluate_s(data_loader, mask_func, denoise_func):  # evaluate
+def evaluate_u(data_loader, denoise_func):  # evaluate
     eval_snr = 0.
-    xx_snr = 0.
     with torch.no_grad():
-        for batch_idx, (x_data, y_data, y_data_freq) in enumerate(data_loader):
+        for batch_idx, (x_data, y_data) in enumerate(data_loader):
             x_data = x_data.to(device)
-            freq_mask = mask_func(x_data)  # generate mask
-            xx_data = models.masking(x_data, freq_mask)  # masking x_data
-            pred = denoise_func(xx_data)
-            pred = models.masking(pred, freq_mask)  # masking pred
+            y_data = y_data.to(device)
+            pred = denoise_func(x_data)
+            bypass = denoise_func(y_data)
 
-            pred, x_data, xx_data = pred.to('cpu'), x_data.to('cpu'), xx_data.to('cpu')
-            pred, x_data, xx_data, y_data = pred.numpy(), x_data.numpy(), xx_data.numpy(), y_data.numpy()
+            pred, x_data, y_data, bypass = pred.to('cpu'), x_data.to('cpu'), y_data.to('cpu'), bypass.to('cpu')
+            pred, x_data, y_data, bypass = pred.numpy(), x_data.numpy(), y_data.numpy(), bypass.numpy()
             eval_snr += personal.snr(y_data, pred) / 32
-            xx_snr += personal.snr(xx_data, pred) / 32
             if batch_idx == 0:
                 for k in range(4):
                     index = k
@@ -192,51 +148,68 @@ def evaluate_s(data_loader, mask_func, denoise_func):  # evaluate
                         index += 4
 
                     y_max = np.max(y_data[index])
-                    xx_max = np.max(xx_data[index])
                     pred_max = np.max(pred[index])
+                    eval_temp = np.copy(pred[index])
+                    bypass_max = np.max(bypass[index])
+                    bypass_temp = np.copy(bypass[index])
+                    window_temp = 0.0
+                    for num, sample in enumerate(eval_temp):
+                        if sample * sample < speech_threshold:  # * 0
+                            if window_temp > 0.5:
+                                window_temp -= 0.01
+                                eval_temp[num] *= window_temp
+                            else:
+                                eval_temp[num] *= 0.0
+                                window_temp = 0.0
+                        else:  # * 1
+                            if window_temp < 0.5:
+                                window_temp += 0.01
+                                eval_temp[num] *= window_temp
+                            else:
+                                eval_temp[num] *= 1.0
+                                window_temp = 1.0
+
+                    window_temp = 0.0
+                    for num, sample in enumerate(bypass_temp):
+                        if sample * sample < speech_threshold:  # * 0
+                            if window_temp > 0.5:
+                                window_temp -= 0.01
+                                bypass_temp[num] *= window_temp
+                            else:
+                                bypass_temp[num] *= 0.0
+                                window_temp = 0.0
+                        else:  # * 1
+                            if window_temp < 0.5:
+                                window_temp += 0.01
+                                bypass_temp[num] *= window_temp
+                            else:
+                                bypass_temp[num] *= 1.0
+                                window_temp = 1.0
+
                     sf.write('./test_files/denoise_eval' + str(index) + '.wav',
-                             pred[index] * y_max / pred_max, 16000)
+                             eval_temp * y_max / pred_max, 16000)
+                    sf.write('./test_files/denoise_bypass' + str(index) + '.wav',
+                             bypass_temp * y_max / bypass_max, 16000)
                     sf.write('./test_files/denoise_x' + str(index) + '.wav', x_data[index], 16000)
-                    sf.write('./test_files/denoise_xx' + str(index) + '.wav',
-                             xx_data[index] * y_max / xx_max, 16000)
                     sf.write('./test_files/denoise_y' + str(index) + '.wav', y_data[index], 16000)
         eval_snr /= len(data_loader)
-        xx_snr /= len(data_loader)
         print('Final Model SNR: ', eval_snr, 'dB')
-        print('Masking SNR: ', xx_snr, 'dB')
 
 
-if train_mask:
+if train_u_bool:
     for epoch in range(EPOCHS):
         print(f"Epoch {epoch + 1}\n-------------------------------")
-        train_step(dataloader, mask_model, _loss_fn_mask, _optimizer_mask)
-        test_step(dataloader_test, mask_model, _loss_fn_mask)
+        train_u(dataloader, _model, _loss_fn, _optimizer)
+        test_u(dataloader_test, _model, _loss_fn)
 
-    torch.save(mask_model.state_dict(), './saved_models/mask_model/model1.pt')
-
-    print("Done!")
-
-if train_ae:
-    if not train_mask:
-        mask_state_dict = torch.load('./saved_models/mask_model/model1.pt', map_location=device)
-        mask_model.load_state_dict(mask_state_dict)
-    for epoch in range(EPOCHS):
-        print(f"Epoch {epoch + 1}\n-------------------------------")
-        train_s(dataloader, denoise_model, _loss_fn_denoise, _optimizer_denoise, mask_model)
-        test_s(dataloader_test, denoise_model, _loss_fn_denoise, mask_model)
-
-    torch.save(denoise_model.state_dict(),  './saved_models/denoise_model/model1.pt')
+    torch.save(_model.state_dict(), './saved_models/giant_model5.pt')
 
     print("Done!")
-
 
 if evaluate:
-    if not train_mask:
-        mask_state_dict = torch.load('./saved_models/mask_model/model1.pt', map_location=device)
-        mask_model.load_state_dict(mask_state_dict)
-    if not train_ae:
-        denoise_state_dict = torch.load('./saved_models/denoise_model/model1.pt', map_location=device)
-        denoise_model.load_state_dict(denoise_state_dict)
+    if not train_u_bool:
+        state_dict = torch.load('./saved_models/giant_model4.pt', map_location=device)
+        _model.load_state_dict(state_dict)
 
-    evaluate_s(dataloader_test, mask_model, denoise_model)
+    evaluate_u(dataloader_test, _model)
     print("Done!")
