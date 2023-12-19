@@ -69,11 +69,11 @@ class CustomDataset(torch.utils.data.Dataset):
         self.path = path
         self.sr = data_sr
         if train:
-            self.x_data_path = path + '/train/x_data'
-            self.y_data_path = path + '/train/y_data'
+            self.x_data_path = path + '/noisy_trainset_28spk_wav'
+            self.y_data_path = path + '/clean_trainset_28spk_wav'
         else:
-            self.x_data_path = path + '/test/x_data'
-            self.y_data_path = path + '/test/y_data'
+            self.x_data_path = path + '/noisy_testset_wav'
+            self.y_data_path = path + '/clean_testset_wav'
 
         self.x_data_list = sorted(glob(self.x_data_path + '/*.wav'))
         self.y_data_list = sorted(glob(self.y_data_path + '/*.wav'))
@@ -83,8 +83,18 @@ class CustomDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx):
         x_data, _ = librosa.load(self.x_data_list[idx], sr=self.sr)
-        x_data /= np.max(np.abs(x_data))
         y_data, _ = librosa.load(self.y_data_list[idx], sr=self.sr)
+        size = x_data.shape[0]
+
+        if size > 512 * 200:
+            x_data = x_data[:512 * 200]
+            y_data = y_data[:512 * 200]
+        else:
+            zeros = np.zeros(512 * 200 - size)
+            x_data = np.concatenate((x_data, zeros)).astype('float32')
+            y_data = np.concatenate((y_data, zeros)).astype('float32')
+
+        x_data /= np.max(np.abs(x_data))
         y_data /= np.max(np.abs(y_data))
 
         return x_data, y_data
