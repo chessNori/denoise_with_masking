@@ -2,123 +2,93 @@ import torch
 import torch.nn.functional as F
 
 
-class UNET(torch.nn.Module):
-    def __init__(self, n_fft):
-        super(UNET, self).__init__()
-        self.n_fft = n_fft
+class Encoder(torch.nn.Module):
+    def __init__(self, down_sample, in_channel, out_channel, kernel_size):
+        super().__init__()
 
-        self.encoder1 = torch.nn.Sequential(
-            torch.nn.Conv2d(1, 16, (5, 5), (1, 1), (2, 2)),
-            torch.nn.PReLU(16),
-            torch.nn.Conv2d(16, 16, (5, 5), (1, 1), (2, 2)),
-            torch.nn.PReLU(16)
-        )
-
-        self.encoder2 = torch.nn.Sequential(
-            torch.nn.Conv2d(16, 16, (5, 5), (1, 2), (2, 2)),
-            torch.nn.PReLU(16),
-            torch.nn.Conv2d(16, 16, (5, 5), (1, 1), (2, 2)),
-            torch.nn.PReLU(16)
-        )
-
-        self.encoder3 = torch.nn.Sequential(
-            torch.nn.Conv2d(16, 16, (5, 5), (1, 2), (2, 2)),
-            torch.nn.PReLU(16),
-            torch.nn.Conv2d(16, 16, (5, 5), (1, 1), (2, 2)),
-            torch.nn.PReLU(16)
-        )
-
-        self.latent = torch.nn.Sequential(
-            torch.nn.Conv2d(16, 16, (5, 5), (1, 2), (2, 2)),
-            torch.nn.PReLU(16),
-            torch.nn.Conv2d(16, 16, (5, 5), (1, 1), (2, 2)),
-            torch.nn.PReLU(16)
-        )
-
-        self.up_sampling1 = torch.nn.Sequential(
-            torch.nn.ConvTranspose2d(16, 16, (5, 5), (1, 2), (2, 2)),
-            torch.nn.PReLU(16)
-        )
-
-        self.decoder1 = torch.nn.Sequential(
-            torch.nn.ConvTranspose2d(32, 16, (5, 5), (1, 1), (2, 2)),
-            torch.nn.PReLU(16),
-            torch.nn.ConvTranspose2d(16, 16, (5, 5), (1, 1), (2, 2)),
-            torch.nn.PReLU(16)
-        )
-
-        self.up_sampling2 = torch.nn.Sequential(
-            torch.nn.ConvTranspose2d(16, 16, (5, 5), (1, 2), (2, 2)),
-            torch.nn.PReLU(16)
-        )
-        self.decoder2 = torch.nn.Sequential(
-            torch.nn.ConvTranspose2d(32, 16, (5, 5), (1, 1), (2, 2)),
-            torch.nn.PReLU(16),
-            torch.nn.ConvTranspose2d(16, 16, (5, 5), (1, 1), (2, 2)),
-            torch.nn.PReLU(16)
-        )
-
-        self.up_sampling3 = torch.nn.Sequential(
-            torch.nn.ConvTranspose2d(16, 16, (5, 5), (1, 2), (2, 2)),
-            torch.nn.PReLU(16)
-        )
-        self.decoder3 = torch.nn.Sequential(
-            torch.nn.ConvTranspose2d(32, 16, (5, 5), (1, 1), (2, 2)),
-            torch.nn.PReLU(16),
-            torch.nn.ConvTranspose2d(16, 16, (5, 5), (1, 1), (2, 2)),
-            torch.nn.PReLU(16)
-        )
-
-        self.output = torch.nn.Sequential(
-            torch.nn.Conv2d(16, 1, (5, 5), (1, 1), (2, 2)),
-            torch.nn.Sigmoid()
+        self.module = torch.nn.Sequential(
+            torch.nn.Conv1d(in_channel, out_channel, kernel_size, down_sample, kernel_size // 2),
+            torch.nn.PReLU(out_channel),
+            torch.nn.Conv1d(out_channel, out_channel, kernel_size, 1, kernel_size // 2),
+            torch.nn.PReLU(out_channel)
         )
 
     def forward(self, inputs):
-        phase = torch.stft(F.pad(inputs, (0, self.n_fft), 'constant', 0),
-                           n_fft=self.n_fft, hop_length=self.n_fft//2, win_length=self.n_fft,
-                           center=False, return_complex=False)
-        mag = torch.sqrt(torch.pow(phase[:, :, :, 0], 2.0) + torch.pow(phase[:, :, :, 1], 2.0))
-        phase[:, :, :, 0] /= mag
-        phase[:, :, :, 1] /= mag
-        mag_db = torch.log10(mag + 1.0e-7)
-        mag_db = torch.transpose(mag_db, 1, 2)
-        mag_db = torch.unsqueeze(mag_db, 1)
-
-        e1 = self.encoder1(mag_db)
-        e2 = self.encoder2(e1)
-        e3 = self.encoder3(e2)
-
-        l1 = self.latent(e3)
-
-        u1 = self.up_sampling1(l1)
-        d1 = self.decoder1(torch.cat((e3, u1), 1))
-        u2 = self.up_sampling2(d1)
-        d2 = self.decoder2(torch.cat((e2, u2), 1))
-        u3 = self.up_sampling3(d2)
-        d3 = self.decoder3(torch.cat((e1, u3), 1))
-        d3 = self.output(d3)
-
-        freq_mask = torch.squeeze(d3)
-
-        x = masking(inputs, freq_mask)
-
-        return x
+        return self.module(inputs)
 
 
-def masking(inputs, mask, n_fft=512):
-    sine_window = torch.Tensor(range(n_fft + 2)) * (4.0 * torch.atan(torch.Tensor([1.0]))) / (n_fft + 2)
-    sine_window = torch.sin(sine_window[1:-1])
-    sine_window = sine_window.to('cuda')
-    spec = torch.stft(F.pad(inputs, (0, n_fft), 'constant', 0),
-                      window=sine_window,
-                      n_fft=n_fft, hop_length=n_fft // 2, win_length=n_fft,
-                      center=False, return_complex=True)
-    relu = torch.nn.ReLU()
-    p_mask = relu(mask)
-    spec *= torch.transpose(p_mask, 1, 2).type(torch.complex64)
-    res = torch.istft(spec, n_fft=n_fft, hop_length=n_fft//2, win_length=n_fft,
-                      window=sine_window,
-                      center=False, return_complex=False)
+class Decoder(torch.nn.Module):
+    def __init__(self, channel, kernel_size):
+        super().__init__()
 
-    return res[:, :n_fft * 200]
+        self.module1 = torch.nn.Sequential(
+            torch.nn.ConvTranspose1d(channel * 2, channel, kernel_size, 1, kernel_size // 2),
+            torch.nn.PReLU(channel)
+        )
+        self.module2 = torch.nn.Sequential(
+            torch.nn.ConvTranspose1d(channel, channel, kernel_size, 1, kernel_size // 2),
+            torch.nn.PReLU(channel)
+        )
+
+    def forward(self, inputs):
+        x = F.pad(inputs, (0, 1), value=0)
+        x = self.module1(x)
+        return self.module2(x)[:, :, :-1]
+
+
+class UpSampler(torch.nn.Module):
+    def __init__(self, up_sampling, channel, kernel_size, out_channel=None):
+        super().__init__()
+        if out_channel is None:
+            out_channel = channel // 2
+        self.module = torch.nn.Sequential(
+            torch.nn.ConvTranspose1d(channel, out_channel, kernel_size, up_sampling, kernel_size // 2),
+            torch.nn.PReLU(out_channel)
+        )
+
+    def forward(self, inputs):
+        x = F.pad(inputs, (0, 1), value=0)
+        return self.module(x)[:, :, :-1]
+
+
+class Denoiser(torch.nn.Module):
+    def __init__(self, rank):
+        super().__init__()
+        device = (
+            "cuda"
+            if torch.cuda.is_available()
+            else "cpu"
+        )
+        self.rank = rank
+        self.input = Encoder(2, 1, 16, 5).to(device)
+        self.encoder = []
+        for i in range(self.rank):
+            self.encoder.append(Encoder(2, pow(2, i + 4), pow(2, i + 5), 5).to(device))
+        self.up_sampling = []
+        for i in range(self.rank, 0, -1):
+            self.up_sampling.append(UpSampler(2, pow(2, i + 4), 5).to(device))
+        self.decoder = []
+        for i in range(self.rank, 0, -1):
+            self.decoder.append(Decoder(pow(2, i + 3), 5).to(device))
+        self.output_up = UpSampler(2, 16, 5, out_channel=1).to(device)
+        self.output = Encoder(1, 2, 1, 5).to(device)
+        self.masking = torch.nn.Tanh()
+
+    def forward(self, inputs):
+        channel_inputs = torch.unsqueeze(inputs, dim=1)
+        e = [self.input(channel_inputs)]
+        for i in range(self.rank):
+            e.append(self.encoder[i](e[i]))
+        up = []
+        d = []
+        for i in range(self.rank):
+            up.append(self.up_sampling[i](e[self.rank - i]))
+            d.append(self.decoder[i](torch.cat((e[self.rank - i - 1], up[i]), dim=1)))
+        output = self.output_up(d[-1])
+        output = self.output(torch.cat((channel_inputs, output), dim=1))
+        output = torch.squeeze(output, dim=1)
+        output = self.masking(output) * 1.8
+        output *= inputs
+        return output
+
+
