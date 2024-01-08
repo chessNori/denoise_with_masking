@@ -4,16 +4,18 @@ import personal
 import torch
 import soundfile as sf
 import numpy as np
+import csv
 
 train_u_bool = False
 evaluate = True
 
-frame_size = 512 * 200
-EPOCHS = 2000
+frame_size = 512 * 512
+n_fft = 512
+EPOCHS = 1000
 batch_size = 32
 speech_threshold = 0.00001
 valid_per = 0.08
-learning_rate = 0.005
+learning_rate = 0.0005
 
 device = (
     "cuda"
@@ -33,13 +35,14 @@ if train_u_bool:
     dataloader_valid = torch.utils.data.DataLoader(dataset=dataset_valid, batch_size=batch_size,
                                                    shuffle=False, drop_last=False)
 else:
-    dataset_test = custom_datasets.CustomTestSet()
+    dataset_test = custom_datasets.CustomTestSet(frame_size)
     dataloader_test = torch.utils.data.DataLoader(dataset=dataset_test, batch_size=1,
                                                   shuffle=False, drop_last=False)
 
-_model = models.Denoiser(rank=4).to(device)
+_model = models.Denoiser(rank=5, n_fft=n_fft).to(device)
 
 _optimizer = torch.optim.Adam(_model.parameters(), lr=learning_rate)
+_scheduler = torch.optim.lr_scheduler.StepLR(_optimizer, step_size=4, gamma=0.99, last_epoch=-1)
 _loss_fn = torch.nn.L1Loss()
 
 
@@ -60,7 +63,7 @@ def train_u(data_loader, model, loss_fn, optimizer):
     print('Train Error: {:.6f}'.format(train_loss), end='')
 
 
-def test_u(data_loader, model, loss_fn):
+def valid_u(data_loader, model, loss_fn):
     test_loss = 0.
     with torch.no_grad():
         for x_data, y_data in data_loader:
@@ -70,12 +73,12 @@ def test_u(data_loader, model, loss_fn):
             test_loss += cost.item()
 
     test_loss /= len(data_loader) * batch_size
-    print(f" // Test Error: {test_loss:>8f}", end='')
+    print(f" // Test Error: {test_loss:>8f}")
 
     return test_loss
 
 
-def evaluate_u(data_loader, denoise_func):  # evaluate
+def test_u(data_loader, denoise_func):  # evaluate
     eval_snr = 0.
     with torch.no_grad():
         for batch_idx, (x_data, y_data) in enumerate(data_loader):
@@ -117,35 +120,30 @@ def evaluate_u(data_loader, denoise_func):  # evaluate
 
 
 if train_u_bool:
-    index = 0
-    count = 0
-    loss_temp = 0.
+    loss_list = []
     min_loss = 100.
-    model_temp = None
     for epoch in range(EPOCHS):
         print(f"Epoch {epoch + 1}\n-------------------------------")
         train_u(dataloader, _model, _loss_fn, _optimizer)
-        loss_temp = test_u(dataloader_valid, _model, _loss_fn)
-        print(' // Count:', count)
-        if epoch > 100 and min_loss > loss_temp:
+        loss_temp = valid_u(dataloader_valid, _model, _loss_fn)
+        _scheduler.step()
+        if loss_temp < min_loss:
             min_loss = loss_temp
-            model_temp = _model.state_dict()
-            count = 0
-        else:
-            count += 1
-            if epoch > 100 and count > 12:
-                torch.save(model_temp, './saved_models/giant_model' + str(index) + '_' + str(min_loss) + '.pt')
-                index += 1
-                count = 0
-    torch.save(model_temp, './saved_models/giant_model' + str(index) + '_' + str(min_loss) + '.pt')
-    torch.save(_model.state_dict(), './saved_models/giant_model_final.pt')
+            torch.save(_model.state_dict(), './saved_models/giant_model_final.pt')
+        loss_list.append(loss_temp)
+        f = open('loss.csv', 'w')
+        writer = csv.writer(f)
+        writer.writerow(loss_list)
+        f.close()
+
+
 
     print("Done!")
 
 if evaluate:
     if not train_u_bool:
-        state_dict = torch.load('./saved_models/giant_model0_0.0004379171067349879.pt', map_location=device)
+        state_dict = torch.load('./saved_models/giant_model_final.pt', map_location=device)
         _model.load_state_dict(state_dict)
 
-    evaluate_u(dataloader_test, _model)
+    test_u(dataloader_test, _model)
     print("Done!")

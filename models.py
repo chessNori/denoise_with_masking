@@ -3,14 +3,16 @@ import torch.nn.functional as F
 
 
 class Encoder(torch.nn.Module):
-    def __init__(self, down_sample, in_channel, out_channel, kernel_size):
+    def __init__(self, kernel_size, n_fft):
         super().__init__()
-
+        channel = n_fft // 2
         self.module = torch.nn.Sequential(
-            torch.nn.Conv1d(in_channel, out_channel, kernel_size, down_sample, kernel_size // 2),
-            torch.nn.PReLU(out_channel),
-            torch.nn.Conv1d(out_channel, out_channel, kernel_size, 1, kernel_size // 2),
-            torch.nn.PReLU(out_channel)
+            torch.nn.Conv1d(channel, channel, kernel_size, 2, kernel_size // 2),
+            torch.nn.PReLU(channel),
+            torch.nn.Conv1d(channel, channel, kernel_size, 1, kernel_size // 2),
+            torch.nn.PReLU(channel),
+            torch.nn.Conv1d(channel, channel, kernel_size, 1, kernel_size // 2),
+            torch.nn.PReLU(channel)
         )
 
     def forward(self, inputs):
@@ -18,77 +20,61 @@ class Encoder(torch.nn.Module):
 
 
 class Decoder(torch.nn.Module):
-    def __init__(self, channel, kernel_size):
+    def __init__(self, kernel_size, n_fft):
         super().__init__()
+        channel = n_fft // 2
 
-        self.module1 = torch.nn.Sequential(
-            torch.nn.ConvTranspose1d(channel * 2, channel, kernel_size, 1, kernel_size // 2),
+        self.up_sampler = torch.nn.Sequential(
+            torch.nn.ConvTranspose1d(channel, channel, kernel_size, 2, kernel_size // 2),
             torch.nn.PReLU(channel)
         )
-        self.module2 = torch.nn.Sequential(
+
+        self.decoder1 = torch.nn.Sequential(
+            torch.nn.ConvTranspose1d(channel * 2, channel, kernel_size, 1, kernel_size // 2),
+            torch.nn.PReLU(channel),
+            torch.nn.ConvTranspose1d(channel, channel, kernel_size, 1, kernel_size // 2),
+            torch.nn.PReLU(channel),
             torch.nn.ConvTranspose1d(channel, channel, kernel_size, 1, kernel_size // 2),
             torch.nn.PReLU(channel)
+
         )
 
-    def forward(self, inputs):
-        x = F.pad(inputs, (0, 1), value=0)
-        x = self.module1(x)
-        return self.module2(x)[:, :, :-1]
-
-
-class UpSampler(torch.nn.Module):
-    def __init__(self, up_sampling, channel, kernel_size, out_channel=None):
-        super().__init__()
-        if out_channel is None:
-            out_channel = channel // 2
-        self.module = torch.nn.Sequential(
-            torch.nn.ConvTranspose1d(channel, out_channel, kernel_size, up_sampling, kernel_size // 2),
-            torch.nn.PReLU(out_channel)
-        )
-
-    def forward(self, inputs):
-        x = F.pad(inputs, (0, 1), value=0)
-        return self.module(x)[:, :, :-1]
+    def forward(self, skip, inputs):
+        x = self.up_sampler(inputs)
+        return self.decoder1(torch.cat((skip, x), dim=1))
 
 
 class Denoiser(torch.nn.Module):
-    def __init__(self, rank):
+    def __init__(self, rank, n_fft):
         super().__init__()
-        device = (
-            "cuda"
-            if torch.cuda.is_available()
-            else "cpu"
-        )
         self.rank = rank
-        self.input = Encoder(2, 1, 16, 5).to(device)
-        self.encoder = []
-        for i in range(self.rank):
-            self.encoder.append(Encoder(2, pow(2, i + 4), pow(2, i + 5), 5).to(device))
-        self.up_sampling = []
-        for i in range(self.rank, 0, -1):
-            self.up_sampling.append(UpSampler(2, pow(2, i + 4), 5).to(device))
-        self.decoder = []
-        for i in range(self.rank, 0, -1):
-            self.decoder.append(Decoder(pow(2, i + 3), 5).to(device))
-        self.output_up = UpSampler(2, 16, 5, out_channel=1).to(device)
-        self.output = Encoder(1, 2, 1, 5).to(device)
-        self.masking = torch.nn.Tanh()
+        self.n_fft = n_fft
+
+        self.encoder = torch.nn.ModuleList([Encoder(3, n_fft) for _ in range(rank)])
+        self.decoder = torch.nn.ModuleList([Decoder(3, n_fft) for _ in range(rank)])
+        self.output = torch.nn.Conv1d(n_fft // 2, n_fft // 2, 3, 1, 1)
+        self.output_act = torch.nn.Sigmoid()
 
     def forward(self, inputs):
-        channel_inputs = torch.unsqueeze(inputs, dim=1)
-        e = [self.input(channel_inputs)]
+        sine_window = torch.Tensor(range(self.n_fft + 2)) * (4.0 * torch.atan(torch.Tensor([1.0]))) / (self.n_fft + 2)
+        sine_window = torch.sin(sine_window[1:-1]).to(inputs.device)
+        spectrogram = torch.stft(F.pad(inputs, (0, self.n_fft), 'constant', 0),
+                                 window=sine_window, n_fft=self.n_fft, hop_length=self.n_fft // 2,
+                                 win_length=self.n_fft, center=False, return_complex=True)
+        mag = torch.abs(spectrogram[:, 1:])
+        mag_db = torch.log10(mag + 1.0e-7)
+
+        e = [mag_db]
         for i in range(self.rank):
             e.append(self.encoder[i](e[i]))
-        up = []
-        d = []
-        for i in range(self.rank):
-            up.append(self.up_sampling[i](e[self.rank - i]))
-            d.append(self.decoder[i](torch.cat((e[self.rank - i - 1], up[i]), dim=1)))
-        output = self.output_up(d[-1])
-        output = self.output(torch.cat((channel_inputs, output), dim=1))
-        output = torch.squeeze(output, dim=1)
-        output = self.masking(output) * 1.8
-        output *= inputs
-        return output
+        x = e[-1]
+        for i in range(self.rank - 1, -1, -1):
+            x = self.decoder[i](e[i], x)
+        mask = self.output(x)
+        mask = self.output_act(mask) * 1.2
+        mask = F.pad(mask, (0, 0, 1, 0), 'constant', 0)
+        spectrogram *= mask.type(torch.complex64)
+        x = torch.istft(spectrogram, n_fft=self.n_fft, hop_length=self.n_fft // 2, win_length=self.n_fft,
+                        window=sine_window, center=False, return_complex=False)[:, :(-1) * (self.n_fft // 2)]
 
-
+        return x
