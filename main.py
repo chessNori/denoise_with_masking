@@ -5,17 +5,18 @@ import torch
 import soundfile as sf
 import numpy as np
 import csv
+import torch.nn.functional as F
 
 train_u_bool = False
 evaluate = True
 
-frame_size = 512 * 512
 n_fft = 512
+frame_size = n_fft * 256
 EPOCHS = 1000
 batch_size = 32
-speech_threshold = 0.00001
+speech_threshold = 0.0001
 valid_per = 0.08
-learning_rate = 0.0005
+learning_rate = 0.0001
 
 device = (
     "cuda"
@@ -25,25 +26,27 @@ device = (
 print(f"Using {device} device")
 
 if train_u_bool:
-    dataset = custom_datasets.CustomTrainSet(frame_size, valid_per)
+    dataset = custom_datasets.CustomTrainSet(n_fft, frame_size, valid_per)
     dataloader = torch.utils.data.DataLoader(dataset=dataset, batch_size=batch_size, shuffle=True, drop_last=False)
     for x, y in dataloader:
         print(x.shape, y.shape)
         break
 
-    dataset_valid = custom_datasets.CustomTrainSet(frame_size, valid_per, train=False)
+    dataset_valid = custom_datasets.CustomTrainSet(n_fft, frame_size, valid_per, train=False)
     dataloader_valid = torch.utils.data.DataLoader(dataset=dataset_valid, batch_size=batch_size,
                                                    shuffle=False, drop_last=False)
 else:
-    dataset_test = custom_datasets.CustomTestSet(frame_size)
+    dataset_test = custom_datasets.CustomTestSet(n_fft, frame_size)
     dataloader_test = torch.utils.data.DataLoader(dataset=dataset_test, batch_size=1,
                                                   shuffle=False, drop_last=False)
 
-_model = models.Denoiser(rank=5, n_fft=n_fft).to(device)
-
+_model = models.Denoiser(rank=8, n_fft=n_fft, device=device).to(device)
 _optimizer = torch.optim.Adam(_model.parameters(), lr=learning_rate)
 _scheduler = torch.optim.lr_scheduler.StepLR(_optimizer, step_size=4, gamma=0.99, last_epoch=-1)
-_loss_fn = torch.nn.L1Loss()
+
+
+def _loss_fn(y_pred, y_true):
+    return torch.mean(torch.abs(y_pred - y_true))
 
 
 def train_u(data_loader, model, loss_fn, optimizer):
@@ -59,7 +62,7 @@ def train_u(data_loader, model, loss_fn, optimizer):
         optimizer.step()
         train_loss += cost.item()
 
-    train_loss /= len(data_loader) * batch_size
+    train_loss /= len(data_loader)
     print('Train Error: {:.6f}'.format(train_loss), end='')
 
 
@@ -78,43 +81,58 @@ def valid_u(data_loader, model, loss_fn):
     return test_loss
 
 
-def test_u(data_loader, denoise_func):  # evaluate
+def test_u(data_loader, denoise_func):  # batch_size = 1
     eval_snr = 0.
-    with torch.no_grad():
-        for batch_idx, (x_data, y_data) in enumerate(data_loader):
-            x_data = x_data.to(device)
-            y_data = y_data.to(device)
+    window = torch.Tensor(range(n_fft + 2)) * (4.0 * torch.atan(torch.Tensor([1.0]))) / (n_fft + 2)
+    window = torch.sin(window[1:-1]).to(device)
+    with (torch.no_grad()):
+        for batch_idx, (x_data, y_data, x_phase, y_phase, wave_length) in enumerate(data_loader):
+            x_data, y_data, x_phase, y_phase = \
+                x_data.to(device), y_data.to(device), x_phase.to(device), y_phase.to(device)
             pred = denoise_func(x_data)
 
-            pred, x_data, y_data = pred.to('cpu'), x_data.to('cpu'), y_data.to('cpu')
-            pred, x_data, y_data = pred.numpy(), x_data.numpy(), y_data.numpy()
-            eval_snr += personal.snr(y_data, pred) / x_data.shape[0]
+            pred = F.pad(pred, (0, 0, 1, 0), 'constant', 0)
+            pred_real = pred * torch.cos(x_phase)
+            pred_imag = pred * torch.sin(x_phase)
+            pred = torch.complex(pred_real, pred_imag)
 
-            for index in range(x_data.shape[0]):
-                y_max = np.max(y_data[index])
-                pred_max = np.max(pred[index])
-                eval_temp = np.copy(pred[index])
-                window_temp = 0.0
-                for num, sample in enumerate(eval_temp):
-                    if pow(sample, 2) < speech_threshold:  # * 0
-                        if window_temp > 0.5:
-                            window_temp -= 0.01
-                            eval_temp[num] *= window_temp
-                        else:
-                            eval_temp[num] *= 0.0
-                            window_temp = 0.0
-                    else:  # * 1
-                        if window_temp < 0.5:
-                            window_temp += 0.01
-                            eval_temp[num] *= window_temp
-                        else:
-                            eval_temp[num] *= 1.0
-                            window_temp = 1.0
+            pred = torch.istft(pred, n_fft=n_fft, hop_length=n_fft // 2, win_length=n_fft,
+                               window=window, center=False, return_complex=False)[0, :wave_length]
 
-                sf.write('./test_files/eval/denoise' + str(batch_idx) + '_' + str(index) + '.wav',
-                         eval_temp * y_max / pred_max, 16000)
-                sf.write('./test_files/y/denoise' + str(batch_idx) + '_' + str(index) + '.wav',
-                         y_data[index], 16000)
+            y_wave = F.pad(y_data, (0, 0, 1, 0), 'constant', 0)
+            y_real = y_wave * torch.cos(y_phase)
+            y_imag = y_wave * torch.sin(y_phase)
+            y_wave = torch.complex(y_real, y_imag)
+
+            y_wave = torch.istft(y_wave, n_fft=n_fft, hop_length=n_fft // 2, win_length=n_fft,
+                                 window=window, center=False, return_complex=False)[0, :wave_length]
+
+            pred, x_data, y_wave = pred.to('cpu'), x_data.to('cpu'), y_wave.to('cpu')
+            pred, x_data, y_wave = pred.numpy(), x_data.numpy(), y_wave.numpy()
+            eval_snr += personal.snr(y_wave, pred) / x_data.shape[0]
+
+            # eval_temp = np.copy(pred)
+            # window_temp = 0.0
+            # for num, sample in enumerate(eval_temp):
+            #     if pow(sample, 2) < speech_threshold:  # * 0
+            #         if window_temp > 0.5:
+            #             window_temp -= 0.01
+            #             eval_temp[num] *= window_temp
+            #         else:
+            #             eval_temp[num] *= 0.0
+            #             window_temp = 0.0
+            #     else:  # * 1
+            #         if window_temp < 0.5:
+            #             window_temp += 0.01
+            #             eval_temp[num] *= window_temp
+            #         else:
+            #             eval_temp[num] *= 1.0
+            #             window_temp = 1.0
+
+            sf.write('./test_files/eval/denoise' + str(batch_idx) + '.wav',
+                     pred, 16000)
+            sf.write('./test_files/y/denoise' + str(batch_idx) + '.wav',
+                     y_wave, 16000)
         eval_snr /= len(data_loader)
         print('Final Model SNR: ', eval_snr, 'dB')
 
@@ -135,8 +153,6 @@ if train_u_bool:
         writer = csv.writer(f)
         writer.writerow(loss_list)
         f.close()
-
-
 
     print("Done!")
 
