@@ -3,7 +3,7 @@ import models
 import personal
 import torch
 import soundfile as sf
-import numpy as np
+# import numpy as np
 import csv
 import torch.nn.functional as F
 
@@ -11,12 +11,12 @@ train_u_bool = False
 evaluate = True
 
 n_fft = 512
-frame_size = n_fft * 256
+rank = 7
+frame_size = n_fft * pow(2, rank -1)
 EPOCHS = 1000
-batch_size = 32
-speech_threshold = 0.0001
-valid_per = 0.08
-learning_rate = 0.0001
+batch_size = 16
+valid_per = 0.1
+learning_rate = 0.0005
 
 device = (
     "cuda"
@@ -40,9 +40,9 @@ else:
     dataloader_test = torch.utils.data.DataLoader(dataset=dataset_test, batch_size=1,
                                                   shuffle=False, drop_last=False)
 
-_model = models.Denoiser(rank=8, n_fft=n_fft, device=device).to(device)
+_model = models.Denoiser(rank=rank, n_fft=n_fft).to(device)
 _optimizer = torch.optim.Adam(_model.parameters(), lr=learning_rate)
-_scheduler = torch.optim.lr_scheduler.StepLR(_optimizer, step_size=4, gamma=0.99, last_epoch=-1)
+_scheduler = torch.optim.lr_scheduler.StepLR(_optimizer, step_size=10, gamma=0.99, last_epoch=-1)
 
 
 def _loss_fn(y_pred, y_true):
@@ -65,6 +65,8 @@ def train_u(data_loader, model, loss_fn, optimizer):
     train_loss /= len(data_loader)
     print('Train Error: {:.6f}'.format(train_loss), end='')
 
+    return train_loss
+
 
 def valid_u(data_loader, model, loss_fn):
     test_loss = 0.
@@ -76,7 +78,7 @@ def valid_u(data_loader, model, loss_fn):
             test_loss += cost.item()
 
     test_loss /= len(data_loader) * batch_size
-    print(f" // Test Error: {test_loss:>8f}")
+    print(f" // Validation Error: {test_loss:>8f}")
 
     return test_loss
 
@@ -111,24 +113,6 @@ def test_u(data_loader, denoise_func):  # batch_size = 1
             pred, x_data, y_wave = pred.numpy(), x_data.numpy(), y_wave.numpy()
             eval_snr += personal.snr(y_wave, pred) / x_data.shape[0]
 
-            # eval_temp = np.copy(pred)
-            # window_temp = 0.0
-            # for num, sample in enumerate(eval_temp):
-            #     if pow(sample, 2) < speech_threshold:  # * 0
-            #         if window_temp > 0.5:
-            #             window_temp -= 0.01
-            #             eval_temp[num] *= window_temp
-            #         else:
-            #             eval_temp[num] *= 0.0
-            #             window_temp = 0.0
-            #     else:  # * 1
-            #         if window_temp < 0.5:
-            #             window_temp += 0.01
-            #             eval_temp[num] *= window_temp
-            #         else:
-            #             eval_temp[num] *= 1.0
-            #             window_temp = 1.0
-
             sf.write('./test_files/eval/denoise' + str(batch_idx) + '.wav',
                      pred, 16000)
             sf.write('./test_files/y/denoise' + str(batch_idx) + '.wav',
@@ -138,20 +122,22 @@ def test_u(data_loader, denoise_func):  # batch_size = 1
 
 
 if train_u_bool:
-    loss_list = []
+    loss_list = [['train_loss'], ['test_loss']]
     min_loss = 100.
     for epoch in range(EPOCHS):
         print(f"Epoch {epoch + 1}\n-------------------------------")
-        train_u(dataloader, _model, _loss_fn, _optimizer)
-        loss_temp = valid_u(dataloader_valid, _model, _loss_fn)
+        train_loss_temp = train_u(dataloader, _model, _loss_fn, _optimizer)
+        test_loss_temp = valid_u(dataloader_valid, _model, _loss_fn)
         _scheduler.step()
-        if loss_temp < min_loss:
-            min_loss = loss_temp
+        if test_loss_temp < min_loss:
+            min_loss = test_loss_temp
             torch.save(_model.state_dict(), './saved_models/giant_model_final.pt')
-        loss_list.append(loss_temp)
+        loss_list[0].append(train_loss_temp)
+        loss_list[1].append(test_loss_temp)
         f = open('loss.csv', 'w')
         writer = csv.writer(f)
-        writer.writerow(loss_list)
+        writer.writerow(loss_list[0])
+        writer.writerow(loss_list[1])
         f.close()
 
     print("Done!")
