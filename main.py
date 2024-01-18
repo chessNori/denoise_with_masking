@@ -9,14 +9,13 @@ import torch.nn.functional as F
 
 train_u_bool = False
 evaluate = True
-
-n_fft = 512
-rank = 7
-frame_size = n_fft * pow(2, rank -1)
-EPOCHS = 1000
+n_fft = 256
+rank = 10
+frame_size = n_fft * pow(2, rank + 1)
+EPOCHS = 4000
 batch_size = 16
+learning_rate = 0.0002
 valid_per = 0.1
-learning_rate = 0.0005
 
 device = (
     "cuda"
@@ -28,8 +27,8 @@ print(f"Using {device} device")
 if train_u_bool:
     dataset = custom_datasets.CustomTrainSet(n_fft, frame_size, valid_per)
     dataloader = torch.utils.data.DataLoader(dataset=dataset, batch_size=batch_size, shuffle=True, drop_last=False)
-    for x, y in dataloader:
-        print(x.shape, y.shape)
+    for x, y, y2 in dataloader:
+        print(x.shape, y.shape, y2.shape)
         break
 
     dataset_valid = custom_datasets.CustomTrainSet(n_fft, frame_size, valid_per, train=False)
@@ -52,10 +51,10 @@ def _loss_fn(y_pred, y_true):
 def train_u(data_loader, model, loss_fn, optimizer):
     model.train()
     train_loss = 0.
-    for x_data, y_data in data_loader:
-        x_data, y_data = x_data.to(device), y_data.to(device)
-        pred = model(x_data)
-        cost = loss_fn(pred, y_data)
+    for x_data, y_data_high, y_data_low in data_loader:
+        x_data, y_data_high, y_data_low = x_data.to(device), y_data_high.to(device), y_data_low.to(device)
+        pred_high_energy, pred_low_energy = model(x_data)
+        cost = loss_fn(pred_high_energy, y_data_high) + loss_fn(pred_low_energy, y_data_low)
 
         optimizer.zero_grad()
         cost.backward()
@@ -71,10 +70,10 @@ def train_u(data_loader, model, loss_fn, optimizer):
 def valid_u(data_loader, model, loss_fn):
     test_loss = 0.
     with torch.no_grad():
-        for x_data, y_data in data_loader:
-            x_data, y_data = x_data.to(device), y_data.to(device)
-            pred = model(x_data)
-            cost = loss_fn(pred, y_data)
+        for x_data, y_data_high, y_data_low in data_loader:
+            x_data, y_data_high, y_data_low = x_data.to(device), y_data_high.to(device), y_data_low.to(device)
+            pred_high_energy, pred_low_energy = model(x_data)
+            cost = loss_fn(pred_high_energy, y_data_high) + loss_fn(pred_low_energy, y_data_low)
             test_loss += cost.item()
 
     test_loss /= len(data_loader) * batch_size
@@ -91,7 +90,8 @@ def test_u(data_loader, denoise_func):  # batch_size = 1
         for batch_idx, (x_data, y_data, x_phase, y_phase, wave_length) in enumerate(data_loader):
             x_data, y_data, x_phase, y_phase = \
                 x_data.to(device), y_data.to(device), x_phase.to(device), y_phase.to(device)
-            pred = denoise_func(x_data)
+            pred_high, pred_low = denoise_func(x_data)
+            pred = pred_high + pred_low / 8.0
 
             pred = F.pad(pred, (0, 0, 1, 0), 'constant', 0)
             pred_real = pred * torch.cos(x_phase)

@@ -12,19 +12,25 @@ class CustomTrainSet(torch.utils.data.Dataset):
         random.seed(seed)
 
         x_data_path = path + '/noisy_trainset_container/x.wav'
-        y_data_path = path + '/clean_trainset_container/y.wav'
+        y_data_path = path + '/clean_trainset_container/high_energy_y.wav'
+        y_data_path2 = path + '/clean_trainset_container/low_energy_y.wav'
 
         x_data_temp = librosa.load(x_data_path, sr=data_sr, dtype='float32')[0]
         y_data_temp = librosa.load(y_data_path, sr=data_sr, dtype='float32')[0]
+        y_data_temp2 = librosa.load(y_data_path2, sr=data_sr, dtype='float32')[0]
+
         length_temp = frame_size - (x_data_temp.shape[0] % frame_size)
         x_data = torch.zeros(x_data_temp.shape[0] + length_temp, dtype=torch.float32)
         y_data = torch.zeros(y_data_temp.shape[0] + length_temp, dtype=torch.float32)
+        y_data2 = torch.zeros(y_data_temp2.shape[0] + length_temp, dtype=torch.float32)
 
         x_data[:-length_temp] += x_data_temp
         y_data[:-length_temp] += y_data_temp
+        y_data2[:-length_temp] += y_data_temp2
 
         x_data = x_data.reshape(-1, frame_size)
         y_data = y_data.reshape(-1, frame_size)
+        y_data2 = y_data2.reshape(-1, frame_size)
 
         valid_idx_list = random.sample(range(x_data.shape[0]), round(x_data.shape[0] * valid_per))
         train_idx_list = list(set(range(x_data.shape[0])) - set(valid_idx_list))
@@ -43,14 +49,19 @@ class CustomTrainSet(torch.utils.data.Dataset):
                        window=window, n_fft=n_fft, hop_length=n_fft // 2,
                        win_length=n_fft, center=False, return_complex=True)[:, 1:]
         )
+        y_data_mag2 = torch.abs(
+            torch.stft(F.pad(y_data2, (0, n_fft // 2), 'constant', 0),
+                       window=window, n_fft=n_fft, hop_length=n_fft // 2,
+                       win_length=n_fft, center=False, return_complex=True)[:, 1:]
+        )
 
-        self.x_data, self.y_data = x_data_mag[idx_list], y_data_mag[idx_list]
+        self.x_data, self.y_data, self.y_data2 = x_data_mag[idx_list], y_data_mag[idx_list], y_data_mag2[idx_list] * 8.0
 
     def __len__(self):
         return self.x_data.shape[0]
 
     def __getitem__(self, idx):
-        return self.x_data[idx], self.y_data[idx]
+        return self.x_data[idx], self.y_data[idx], self.y_data2[idx]
 
 
 class CustomTestSet(torch.utils.data.Dataset):
