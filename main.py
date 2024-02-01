@@ -2,21 +2,21 @@ import custom_datasets
 import models
 import personal
 import torch
+import torch.utils.data as D
 import soundfile as sf
-# import numpy as np
+from pesq import pesq
 import csv
-import torch.nn.functional as F
 
 train_u_bool = False
 evaluate = True
 
 n_fft = 512
 rank = 7
-frame_size = n_fft * pow(2, rank -1)
+frame_size = n_fft * pow(2, rank - 1)
 EPOCHS = 1000
 batch_size = 16
 valid_per = 0.1
-learning_rate = 0.0005
+learning_rate = 0.00035
 
 device = (
     "cuda"
@@ -25,20 +25,22 @@ device = (
 )
 print(f"Using {device} device")
 
-if train_u_bool:
-    dataset = custom_datasets.CustomTrainSet(n_fft, frame_size, valid_per)
-    dataloader = torch.utils.data.DataLoader(dataset=dataset, batch_size=batch_size, shuffle=True, drop_last=False)
-    for x, y in dataloader:
-        print(x.shape, y.shape)
-        break
 
-    dataset_valid = custom_datasets.CustomTrainSet(n_fft, frame_size, valid_per, train=False)
-    dataloader_valid = torch.utils.data.DataLoader(dataset=dataset_valid, batch_size=batch_size,
-                                                   shuffle=False, drop_last=False)
-else:
-    dataset_test = custom_datasets.CustomTestSet(n_fft, frame_size)
-    dataloader_test = torch.utils.data.DataLoader(dataset=dataset_test, batch_size=1,
-                                                  shuffle=False, drop_last=False)
+dataset = custom_datasets.CustomTrainSet(n_fft, frame_size, valid_per)\
+    if train_u_bool else custom_datasets.CustomTestSet(n_fft, frame_size)
+
+dataloader = D.DataLoader(dataset=dataset, batch_size=batch_size, shuffle=True, drop_last=False)\
+    if train_u_bool else D.DataLoader(dataset=dataset, batch_size=1, shuffle=False, drop_last=False)
+
+dataset_valid = custom_datasets.CustomTrainSet(n_fft, frame_size, valid_per, train=False)\
+    if train_u_bool else None
+
+dataloader_valid = D.DataLoader(dataset=dataset_valid, batch_size=batch_size, shuffle=False, drop_last=False)\
+    if train_u_bool else None
+
+for xy in dataloader:
+    print(len(dataset), "data:", xy[0].shape, "//", xy[1].shape)
+    break
 
 _model = models.Denoiser(rank=rank, n_fft=n_fft).to(device)
 _optimizer = torch.optim.Adam(_model.parameters(), lr=learning_rate)
@@ -52,7 +54,7 @@ def _loss_fn(y_pred, y_true):
 def train_u(data_loader, model, loss_fn, optimizer):
     model.train()
     train_loss = 0.
-    for x_data, y_data in data_loader:
+    for x_data, y_data, x_phase, y_phase in data_loader:
         x_data, y_data = x_data.to(device), y_data.to(device)
         pred = model(x_data)
         cost = loss_fn(pred, y_data)
@@ -62,90 +64,115 @@ def train_u(data_loader, model, loss_fn, optimizer):
         optimizer.step()
         train_loss += cost.item()
 
-    train_loss /= len(data_loader)
+    train_loss /= len(dataset)
+
     print('Train Error: {:.6f}'.format(train_loss), end='')
 
     return train_loss
 
 
 def valid_u(data_loader, model, loss_fn):
-    test_loss = 0.
-    with torch.no_grad():
-        for x_data, y_data in data_loader:
+    valid_loss = 0.
+    valid_pesq = 0.
+    exception = 0
+
+    for x_data, y_data, x_phase, y_phase in data_loader:
+        with torch.no_grad():
             x_data, y_data = x_data.to(device), y_data.to(device)
             pred = model(x_data)
             cost = loss_fn(pred, y_data)
-            test_loss += cost.item()
+            valid_loss += cost.item()
+        pred, y_data = pred.to('cpu'), y_data.to('cpu')
+        pred = personal.torch_onesided_istft(pred, x_phase, frame_size, n_fft)
+        y_data = personal.torch_onesided_istft(y_data, y_phase, frame_size, n_fft)
+        pred, y_data = pred.numpy(), y_data.numpy()
+        for i in range(x_data.shape[0]):
+            try:
+                valid_pesq += pesq(16000, y_data[i], pred[i], 'wb')
+            except:
+                exception += 1
 
-    test_loss /= len(data_loader) * batch_size
-    print(f" // Validation Error: {test_loss:>8f}")
+    valid_loss /= len(dataset_valid)
+    valid_pesq /= (len(dataset_valid) - exception)
 
-    return test_loss
+    print(f" // Validation Error: {valid_loss:>8f} // Validation PESQ: {valid_pesq:>8f}")
+
+    return valid_loss, valid_pesq
 
 
 def test_u(data_loader, denoise_func):  # batch_size = 1
-    eval_snr = 0.
-    window = torch.Tensor(range(n_fft + 2)) * (4.0 * torch.atan(torch.Tensor([1.0]))) / (n_fft + 2)
-    window = torch.sin(window[1:-1]).to(device)
-    with (torch.no_grad()):
-        for batch_idx, (x_data, y_data, x_phase, y_phase, wave_length) in enumerate(data_loader):
-            x_data, y_data, x_phase, y_phase = \
-                x_data.to(device), y_data.to(device), x_phase.to(device), y_phase.to(device)
+    res_list = [['File Name', 'SNR', 'PESQ']]
+    list_temp = [None] * 3
+    with torch.no_grad():
+        for x_data, y_data, x_phase, y_phase, wave_length, file_name in data_loader:
+            x_data, x_phase = x_data.to(device), x_phase.to(device)
             pred = denoise_func(x_data)
 
-            pred = F.pad(pred, (0, 0, 1, 0), 'constant', 0)
-            pred_real = pred * torch.cos(x_phase)
-            pred_imag = pred * torch.sin(x_phase)
-            pred = torch.complex(pred_real, pred_imag)
+            pred = personal.torch_onesided_istft(pred, x_phase, wave_length, n_fft)[0]
+            y_wave = personal.torch_onesided_istft(y_data, y_phase, wave_length, n_fft)[0]
 
-            pred = torch.istft(pred, n_fft=n_fft, hop_length=n_fft // 2, win_length=n_fft,
-                               window=window, center=False, return_complex=False)[0, :wave_length]
+            pred = pred.to('cpu')
+            pred, y_wave = pred.numpy(), y_wave.numpy()
+            list_temp[0] = file_name[0].split('\\')[-1]
+            list_temp[1] = personal.snr(y_wave, pred)
+            list_temp[2] = pesq(16000, y_wave, pred, 'wb')
+            res_list.append(list_temp.copy())
 
-            y_wave = F.pad(y_data, (0, 0, 1, 0), 'constant', 0)
-            y_real = y_wave * torch.cos(y_phase)
-            y_imag = y_wave * torch.sin(y_phase)
-            y_wave = torch.complex(y_real, y_imag)
-
-            y_wave = torch.istft(y_wave, n_fft=n_fft, hop_length=n_fft // 2, win_length=n_fft,
-                                 window=window, center=False, return_complex=False)[0, :wave_length]
-
-            pred, x_data, y_wave = pred.to('cpu'), x_data.to('cpu'), y_wave.to('cpu')
-            pred, x_data, y_wave = pred.numpy(), x_data.numpy(), y_wave.numpy()
-            eval_snr += personal.snr(y_wave, pred) / x_data.shape[0]
-
-            sf.write('./test_files/eval/denoise' + str(batch_idx) + '.wav',
-                     pred, 16000)
-            sf.write('./test_files/y/denoise' + str(batch_idx) + '.wav',
-                     y_wave, 16000)
-        eval_snr /= len(data_loader)
-        print('Final Model SNR: ', eval_snr, 'dB')
+            sf.write('./test_files/eval/' + file_name[0].split('\\')[-1], pred, 16000)
+            sf.write('./test_files/y/' + file_name[0].split('\\')[-1], y_wave, 16000)
+    return res_list
 
 
 if train_u_bool:
-    loss_list = [['train_loss'], ['test_loss']]
-    min_loss = 100.
+    loss_list = [['train_loss'], ['validation_loss'], ['validation_pesq']]
+    max_pesq = -1.0
+    min_loss = 100.0
     for epoch in range(EPOCHS):
         print(f"Epoch {epoch + 1}\n-------------------------------")
         train_loss_temp = train_u(dataloader, _model, _loss_fn, _optimizer)
-        test_loss_temp = valid_u(dataloader_valid, _model, _loss_fn)
+        valid_loss_temp, valid_pesq_temp = valid_u(dataloader_valid, _model, _loss_fn)
         _scheduler.step()
-        if test_loss_temp < min_loss:
-            min_loss = test_loss_temp
-            torch.save(_model.state_dict(), './saved_models/giant_model_final.pt')
+        if valid_loss_temp < min_loss:
+            min_loss = valid_loss_temp
+            torch.save({'model_state_dict': _model.state_dict(),
+                        'optimizer_state_dict': _optimizer.state_dict(),
+                        'epoch': epoch}, './saved_models/giant_model_final_loss.pt')
+        if valid_pesq_temp > max_pesq:
+            max_pesq = valid_pesq_temp
+            torch.save({'model_state_dict': _model.state_dict(),
+                        'optimizer_state_dict': _optimizer.state_dict(),
+                        'epoch': epoch}, './saved_models/giant_model_final_pesq.pt')
         loss_list[0].append(train_loss_temp)
-        loss_list[1].append(test_loss_temp)
-        f = open('loss.csv', 'w')
+        loss_list[1].append(valid_loss_temp)
+        loss_list[2].append(valid_pesq_temp)
+        f = open('loss.csv', 'w', newline='')
         writer = csv.writer(f)
         writer.writerow(loss_list[0])
         writer.writerow(loss_list[1])
+        writer.writerow(loss_list[2])
         f.close()
 
     print("Done!")
 
 if evaluate:
     if not train_u_bool:
-        state_dict = torch.load('./saved_models/giant_model_final.pt', map_location=device)
-        _model.load_state_dict(state_dict)
+        checkpoint = torch.load('./saved_models/giant_model_final_loss.pt', map_location=device)
+        _model.load_state_dict(checkpoint)
 
-    test_u(dataloader_test, _model)
+    test_list = test_u(dataloader, _model)
+    eval_snr = 0.
+    eval_pesq = 0.
+    for i in range(1, len(test_list)):
+        eval_snr += test_list[i][1]
+        eval_pesq += test_list[i][2]
+    eval_snr /= len(dataset)
+    eval_pesq /= len(dataset)
+
+    print(f"Final Model SNR: {eval_snr:>8f}dB // Final Model PESQ: {eval_pesq:>8f}")
+
+    f = open('results_pesq.csv', 'w', newline='')
+    writer = csv.writer(f)
+    for i in range(len(test_list)):
+        writer.writerow(test_list[i])
+    f.close()
     print("Done!")

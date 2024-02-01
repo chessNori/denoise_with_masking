@@ -8,9 +8,9 @@ class Encoder(torch.nn.Module):
         self.module = torch.nn.Sequential(
             torch.nn.Conv1d(channel, channel, kernel_size, 2, kernel_size // 2),
             torch.nn.LeakyReLU(),
-            torch.nn.Conv1d(channel, channel, kernel_size, 1, kernel_size // 2),
+            torch.nn.Conv1d(channel, channel, kernel_size, 1, 'same'),
             torch.nn.LeakyReLU(),
-            torch.nn.Conv1d(channel, channel, kernel_size, 1, kernel_size // 2),
+            torch.nn.Conv1d(channel, channel, kernel_size, 1, 'same'),
             torch.nn.LeakyReLU()
         )
 
@@ -50,7 +50,7 @@ class Denoiser(torch.nn.Module):
 
         self.encoder = torch.nn.ModuleList([Encoder(5, n_fft) for _ in range(rank)])
         self.decoder = torch.nn.ModuleList([Decoder(5, n_fft) for _ in range(rank)])
-        self.output = torch.nn.Conv1d(n_fft // 2, n_fft // 2, 3, 1, 1)
+        self.output = torch.nn.Conv1d(n_fft // 2, n_fft // 2, 3, 1, 'same')
         self.output_act = torch.nn.Sigmoid()
 
     def forward(self, inputs):
