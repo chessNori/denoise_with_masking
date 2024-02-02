@@ -55,7 +55,7 @@ class Denoiser(torch.nn.Module):
         self.decoder = torch.nn.ModuleList([Decoder(5, n_fft) for _ in range(rank)])
         self.gru = torch.nn.ModuleList([
             torch.nn.GRU(n_fft // 2, n_fft // 2, num_layers=2, batch_first=True) for _ in range(rank)])
-        self.output = torch.nn.Conv1d(n_fft // 2, n_fft, 5, 1, 2)
+        self.output = torch.nn.Conv1d(n_fft // 2, n_fft // 2, 5, 1, 2)
         self.output_act = torch.nn.Sigmoid()
 
     def forward(self, inputs):
@@ -71,7 +71,6 @@ class Denoiser(torch.nn.Module):
             x = self.decoder[i](gru_skip, None, x)
         x = self.output(x)
         x = self.output_act(x) * 1.6
-        high = x[:, :self.n_fft // 2] * inputs
-        low = x[:, self.n_fft // 2:] * inputs
+        x = x * inputs
 
-        return high, low
+        return x
