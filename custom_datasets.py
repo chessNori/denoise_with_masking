@@ -37,15 +37,16 @@ class CustomTrainSet(D.Dataset):
         idx_list = train_idx_list if train else valid_idx_list
 
         x_data_mag, x_data_phase = personal.torch_stft_magphase(x_data, n_fft)
+        y_data_mag, y_data_phase = personal.torch_stft_magphase(y_data, n_fft)
 
-        self.x_data, self.y_data = x_data_mag[idx_list], y_data[idx_list]
-        self.x_data_phase = x_data_phase[idx_list]
+        self.x_data, self.y_data = x_data_mag[idx_list], y_data_mag[idx_list]
+        self.x_data_phase, self.y_data_phase = x_data_phase[idx_list], y_data_phase[idx_list]
 
     def __len__(self):
         return self.x_data.shape[0]
 
     def __getitem__(self, idx):
-        return self.x_data[idx], self.y_data[idx], self.x_data_phase[idx]
+        return self.x_data[idx], self.y_data[idx], self.x_data_phase[idx], self.y_data_phase[idx]
 
 
 class CustomTestSet(D.Dataset):

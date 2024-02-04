@@ -28,6 +28,11 @@ class Decoder(torch.nn.Module):
             torch.nn.LeakyReLU()
         )
 
+        self.gate_attention = torch.nn.Sequential(
+            torch.nn.Linear(channel, channel),
+            torch.nn.Sigmoid()
+        )
+
         self.decoder1 = torch.nn.Sequential(
             torch.nn.ConvTranspose1d(channel * 2, channel, kernel_size, 1, kernel_size // 2),
             torch.nn.LeakyReLU(),
@@ -38,8 +43,13 @@ class Decoder(torch.nn.Module):
         )
 
     def forward(self, skip, inputs):
-        x = self.up_sampler(inputs)
-        return self.decoder1(torch.cat((skip, x), dim=1))
+        x1 = torch.transpose(skip, 1, 2)
+        attention = self.gate_attention(x1)
+        x1 = x1 * attention
+        x1 = torch.transpose(x1, 1, 2)
+
+        x2 = self.up_sampler(inputs)
+        return self.decoder1(torch.cat((x1, x2), dim=1))
 
 
 class Denoiser(torch.nn.Module):
