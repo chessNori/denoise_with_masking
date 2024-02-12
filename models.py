@@ -18,6 +18,27 @@ class Encoder(torch.nn.Module):
         return self.module(inputs)
 
 
+class Aligner(torch.nn.Module):
+    def __init__(self, channel):
+        super().__init__()
+        self.gate_vector = torch.nn.Linear(channel, channel)
+        self.input_feature = torch.nn.Linear(channel, channel)
+        self.attention = torch.nn.Linear(channel, channel)
+        self.leaky_relu = torch.nn.LeakyReLU()
+        self.sigmoid = torch.nn.Sigmoid()
+
+    def forward(self, inputs, query):
+        x = self.input_feature(torch.transpose(inputs, 1, 2))
+        gate = self.gate_vector(torch.transpose(query, 1, 2))
+        x = x + gate
+        x = self.leaky_relu(x)
+        x = self.attention(x)
+        x = self.sigmoid(x)
+        x = torch.transpose(x, 1, 2)
+
+        return x
+
+
 class Decoder(torch.nn.Module):
     def __init__(self, kernel_size, n_fft):
         super().__init__()
@@ -28,12 +49,9 @@ class Decoder(torch.nn.Module):
             torch.nn.LeakyReLU()
         )
 
-        self.gate_attention = torch.nn.Sequential(
-            torch.nn.Linear(channel, channel),
-            torch.nn.Sigmoid()
-        )
+        self.gate_attention = Aligner(channel)
 
-        self.decoder1 = torch.nn.Sequential(
+        self.decoder = torch.nn.Sequential(
             torch.nn.ConvTranspose1d(channel * 2, channel, kernel_size, 1, kernel_size // 2),
             torch.nn.LeakyReLU(),
             torch.nn.ConvTranspose1d(channel, channel, kernel_size, 1, kernel_size // 2),
@@ -43,13 +61,11 @@ class Decoder(torch.nn.Module):
         )
 
     def forward(self, skip, inputs):
-        x1 = torch.transpose(skip, 1, 2)
-        attention = self.gate_attention(x1)
-        x1 = x1 * attention
-        x1 = torch.transpose(x1, 1, 2)
+        x1 = self.up_sampler(inputs)
+        attention_score = self.gate_attention(x1, skip)
+        x2 = x1 * attention_score  # skip
 
-        x2 = self.up_sampler(inputs)
-        return self.decoder1(torch.cat((x1, x2), dim=1))
+        return self.decoder(torch.cat((x1, x2), dim=1))
 
 
 class Denoiser(torch.nn.Module):
