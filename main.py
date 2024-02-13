@@ -7,8 +7,8 @@ import soundfile as sf
 from pesq import pesq
 import csv
 
-train_u_bool = True
-evaluate = False
+train_u_bool = False
+evaluate = True
 
 n_fft = 512
 rank = 7
@@ -156,8 +156,8 @@ if train_u_bool:
 
 if evaluate:
     if not train_u_bool:
-        checkpoint = torch.load('./saved_models/giant_model_final_loss.pt', map_location=device)
-        _model.load_state_dict(checkpoint)
+        checkpoint = torch.load('./saved_models/giant_model_final_pesq.pt', map_location=device)
+        _model.load_state_dict(checkpoint['model_state_dict'])
 
     test_list = test_u(dataloader, _model)
     eval_snr = 0.

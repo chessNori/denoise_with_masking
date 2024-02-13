@@ -23,14 +23,14 @@ class Decoder(torch.nn.Module):
         super().__init__()
         channel = n_fft // 2
         self.nn_skip = nn_skip
-        input_rank = 3 if nn_skip else 2
+        input_rank = 4 if nn_skip else 3
 
         self.up_sampler = torch.nn.Sequential(
             torch.nn.ConvTranspose1d(channel, channel, kernel_size + 1, 2, kernel_size // 2),
             torch.nn.LeakyReLU()
         )
 
-        self.decoder1 = torch.nn.Sequential(
+        self.decoder = torch.nn.Sequential(
             torch.nn.ConvTranspose1d(channel * input_rank, channel, kernel_size, 1, kernel_size // 2),
             torch.nn.LeakyReLU(),
             torch.nn.ConvTranspose1d(channel, channel, kernel_size, 1, kernel_size // 2),
@@ -42,7 +42,7 @@ class Decoder(torch.nn.Module):
     def forward(self, skip, gru_skip, inputs):
         x = self.up_sampler(inputs)
         x = torch.cat((skip, gru_skip, x), dim=1) if self.nn_skip else torch.cat((skip, x), dim=1)
-        return self.decoder1(x)
+        return self.decoder(x)
 
 
 class Denoiser(torch.nn.Module):
@@ -54,7 +54,8 @@ class Denoiser(torch.nn.Module):
         self.encoder = torch.nn.ModuleList([Encoder(5, n_fft) for _ in range(rank)])
         self.decoder = torch.nn.ModuleList([Decoder(5, n_fft) for _ in range(rank)])
         self.gru = torch.nn.ModuleList([
-            torch.nn.GRU(n_fft // 2, n_fft // 2, num_layers=2, batch_first=True) for _ in range(rank)])
+            torch.nn.GRU(n_fft // 2, n_fft // 2, num_layers=2,
+                         batch_first=True, bidirectional=True) for _ in range(rank)])
         self.output = torch.nn.Conv1d(n_fft // 2, n_fft // 2, 5, 1, 2)
         self.output_act = torch.nn.Sigmoid()
 
