@@ -10,12 +10,6 @@ class CustomTrainSet(D.Dataset):
     def __init__(self, n_fft, frame_size, valid_per, train=True, seed=42, path='../datasets/nsdtseaCustom', data_sr=16000):
         super().__init__()
         random.seed(seed)
-        window = torch.Tensor(range(n_fft + 2)) * (4.0 * torch.atan(torch.Tensor([1.0]))) / (n_fft + 2)
-        window = torch.sin(window[1:-1])
-        frame_window = torch.ones(frame_size)
-        frame_window[:n_fft // 2] = window[:n_fft // 2]
-        frame_window[(-1) * (n_fft // 2):] = window[n_fft // 2:]
-
 
         x_data_path = path + '/noisy_trainset_container/x.wav'
         y_data_path = path + '/clean_trainset_container/y.wav'
@@ -29,8 +23,8 @@ class CustomTrainSet(D.Dataset):
         x_data[:-length_temp] += x_data_temp
         y_data[:-length_temp] += y_data_temp
 
-        x_data = x_data.reshape(-1, frame_size) * frame_window
-        y_data = y_data.reshape(-1, frame_size) * frame_window
+        x_data = x_data.reshape(-1, frame_size)
+        y_data = y_data.reshape(-1, frame_size)
 
         valid_idx_list = random.sample(range(x_data.shape[0]), round(x_data.shape[0] * valid_per))
         train_idx_list = list(set(range(x_data.shape[0])) - set(valid_idx_list))
