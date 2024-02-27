@@ -7,15 +7,15 @@ import soundfile as sf
 from pesq import pesq
 import csv
 
-train_u_bool = False
-evaluate = True
+train_u_bool = True
+evaluate = False
 
 n_fft = 512
 frame_size = n_fft * 256
 EPOCHS = 10000
 batch_size = 16
 valid_per = 0.1
-learning_rate = 0.0005
+learning_rate = 0.001
 
 device = (
     "cuda"
@@ -41,16 +41,16 @@ for xy in dataloader:
     break
 
 _model = models.Denoiser(n_fft).to(device)
-_optimizer = torch.optim.Adam(_model.parameters(), lr=learning_rate)
-last_epoch = -1
+_optimizer = torch.optim.AdamW(_model.parameters(), learning_rate)
+# last_epoch = -1
 
-# _checkpoint = torch.load('./saved_models/giant_model_final_pesq.pt', map_location=device)
-# _model.load_state_dict(_checkpoint['model_state_dict'])
-# _optimizer.load_state_dict(_checkpoint['optimizer_state_dict'])
+_checkpoint = torch.load('./saved_models/giant_model_final_loss.pt', map_location=device)
+_model.load_state_dict(_checkpoint['model_state_dict'])
+_optimizer.load_state_dict(_checkpoint['optimizer_state_dict'])
 
-# last_epoch = _checkpoint['epoch']
+last_epoch = _checkpoint['epoch']
 _scheduler = torch.optim.lr_scheduler.StepLR(_optimizer, step_size=10, gamma=0.99, last_epoch=last_epoch)
-# print("Check Point Epoch:", last_epoch)
+print("Check Point Epoch:", last_epoch)
 
 
 def _loss_fn(y_pred, y_true):
