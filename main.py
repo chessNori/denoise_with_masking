@@ -7,8 +7,8 @@ import soundfile as sf
 from pesq import pesq
 import csv
 
-train_u_bool = True
-evaluate = False
+train_u_bool = False
+evaluate = True
 
 n_fft = 512
 frame_size = n_fft * 256
@@ -49,7 +49,7 @@ _model.load_state_dict(_checkpoint['model_state_dict'])
 _optimizer.load_state_dict(_checkpoint['optimizer_state_dict'])
 
 last_epoch = _checkpoint['epoch']
-_scheduler = torch.optim.lr_scheduler.StepLR(_optimizer, step_size=10, gamma=0.99, last_epoch=last_epoch)
+_scheduler = torch.optim.lr_scheduler.StepLR(_optimizer, step_size=15, gamma=0.99, last_epoch=last_epoch)
 print("Check Point Epoch:", last_epoch)
 
 
@@ -61,7 +61,7 @@ def train_u(data_loader, model, loss_fn, optimizer):
     model.train()
     train_loss = 0.
     for x_data, y_data, x_phase, y_phase in data_loader:
-        x_data, y_data = x_data.to(device), y_data.to(device)
+        x_data, y_data = x_data.to(device, non_blocking=True), y_data.to(device, non_blocking=True)
         pred = model(x_data)
         cost = loss_fn(pred, y_data)
 
@@ -80,31 +80,31 @@ def train_u(data_loader, model, loss_fn, optimizer):
 def valid_u(data_loader, model, loss_fn):
     model.eval()
     valid_loss = 0.
-    # valid_pesq = 0.
-    # exception = 0
+    valid_pesq = 0.
+    exception = 0
 
     for x_data, y_data, x_phase, y_phase in data_loader:
         with torch.no_grad():
-            x_data, y_data = x_data.to(device), y_data.to(device)
+            x_data, y_data = x_data.to(device, non_blocking=True), y_data.to(device, non_blocking=True)
             pred = model(x_data)
             cost = loss_fn(pred, y_data)
             valid_loss += cost.item()
-        # pred, y_data = pred.to('cpu'), y_data.to('cpu')
-        # pred = personal.torch_onesided_istft(pred, x_phase, frame_size, n_fft)
-        # y_data = personal.torch_onesided_istft(y_data, y_phase, frame_size, n_fft)
-        # pred, y_data = pred.numpy(), y_data.numpy()
-        # for i in range(x_data.shape[0]):
-        #     try:
-        #         valid_pesq += pesq(16000, y_data[i], pred[i], 'wb')
-        #     except:
-        #         exception += 1
+        pred, y_data = pred.to('cpu'), y_data.to('cpu')
+        pred = personal.torch_onesided_istft(pred, x_phase, frame_size, n_fft)
+        y_data = personal.torch_onesided_istft(y_data, y_phase, frame_size, n_fft)
+        pred, y_data = pred.numpy(), y_data.numpy()
+        for i in range(x_data.shape[0]):
+            try:
+                valid_pesq += pesq(16000, y_data[i], pred[i], 'wb')
+            except:
+                exception += 1
 
     valid_loss /= len(dataset_valid)
-    # valid_pesq /= (len(dataset_valid) - exception)
+    valid_pesq /= (len(dataset_valid) - exception)
 
-    print(f" // Validation Error: {valid_loss:>8f}")  # // Validation PESQ: {valid_pesq:>8f}")
+    print(f" // Validation Error: {valid_loss:>8f} // Validation PESQ: {valid_pesq:>8f}")
 
-    return valid_loss  # , valid_pesq
+    return valid_loss, valid_pesq
 
 
 def test_u(data_loader, denoise_func):  # batch_size = 1
@@ -115,7 +115,7 @@ def test_u(data_loader, denoise_func):  # batch_size = 1
     padding = torch.sin(padding[1:n_fft//2 + 1])
     with torch.no_grad():
         for x_data, y_data, x_phase, y_phase, wave_length, file_name in data_loader:
-            x_data, x_phase = x_data.to(device), x_phase.to(device)
+            x_data, x_phase = x_data.to(device, non_blocking=True), x_phase.to(device, non_blocking=True)
             pred = denoise_func(x_data)
 
             pred = personal.torch_onesided_istft(pred, x_phase, wave_length, n_fft)[0]
@@ -136,39 +136,39 @@ def test_u(data_loader, denoise_func):  # batch_size = 1
 
 
 if train_u_bool:
-    loss_list = [['train_loss'], ['validation_loss']]  # , ['validation_pesq']]
-    # max_pesq = -1.0
+    loss_list = [['train_loss'], ['validation_loss'], ['validation_pesq']]
+    max_pesq = -1.0
     min_loss = 100.0
     for epoch in range(last_epoch + 1, EPOCHS):
         print(f"Epoch {epoch + 1}\n-------------------------------")
         train_loss_temp = train_u(dataloader, _model, _loss_fn, _optimizer)
-        valid_loss_temp = valid_u(dataloader_valid, _model, _loss_fn)
+        valid_loss_temp, valid_pesq_temp = valid_u(dataloader_valid, _model, _loss_fn)
         _scheduler.step()
         if valid_loss_temp < min_loss:
             min_loss = valid_loss_temp
             torch.save({'model_state_dict': _model.state_dict(),
                         'optimizer_state_dict': _optimizer.state_dict(),
                         'epoch': epoch}, './saved_models/giant_model_final_loss.pt')
-        # if valid_pesq_temp > max_pesq:
-        #     max_pesq = valid_pesq_temp
-        #     torch.save({'model_state_dict': _model.state_dict(),
-        #                 'optimizer_state_dict': _optimizer.state_dict(),
-        #                 'epoch': epoch}, './saved_models/giant_model_final_pesq.pt')
+        if valid_pesq_temp > max_pesq:
+            max_pesq = valid_pesq_temp
+            torch.save({'model_state_dict': _model.state_dict(),
+                        'optimizer_state_dict': _optimizer.state_dict(),
+                        'epoch': epoch}, './saved_models/giant_model_final_pesq.pt')
         loss_list[0].append(train_loss_temp)
         loss_list[1].append(valid_loss_temp)
-        # loss_list[2].append(valid_pesq_temp)
+        loss_list[2].append(valid_pesq_temp)
         f = open('loss.csv', 'w', newline='')
         writer = csv.writer(f)
         writer.writerow(loss_list[0])
         writer.writerow(loss_list[1])
-        # writer.writerow(loss_list[2])
+        writer.writerow(loss_list[2])
         f.close()
 
     print("Done!")
 
 if evaluate:
     if not train_u_bool:
-        checkpoint = torch.load('./saved_models/giant_model_final_loss.pt', map_location=device)
+        checkpoint = torch.load('./saved_models/giant_model_final_pesq.pt', map_location=device)
         _model.load_state_dict(checkpoint['model_state_dict'])
 
     test_list = test_u(dataloader, _model)
